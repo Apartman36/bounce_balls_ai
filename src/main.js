@@ -1,11 +1,16 @@
 (() => {
 const MAX_BALLS = 400;
+const QUALITY = "balanced";
+const MAX_DPR = 1.5;
+const BALL_GLOW_MODE = "cheap";
+const MAX_PARTICLES = 520;
+const TRAIL_LENGTH = 10;
 const BALL_RADIUS = 7;
 const BALL_SPEED = 330;
 const BOUNCE_DAMPING = 0.988;
-const TRAIL_LENGTH = 18;
-const PARTICLE_COUNT = 30;
+const PARTICLE_COUNT = 22;
 const RING_LINE_WIDTH = 7;
+const OUTER_RING_LINE_SCALE = 1.12;
 const SPIKE_COUNT = 96;
 const TAU = Math.PI * 2;
 const FIXED_DT = 1 / 120;
@@ -18,7 +23,6 @@ const VELOCITY_JITTER = 26;
 const SUCCESS_CONFETTI = 260;
 const STALL_OUTWARD_START = 20;
 const OUTER_GAP_WIDEN_START = 25;
-const MAX_PARTICLES = 900;
 const MAX_FLOATING_TEXTS = 18;
 const LEVELS = [
     {
@@ -339,7 +343,7 @@ function resizeCanvas() {
     const oldGeometry = geometry;
     const width = Math.max(320, rect.width);
     const height = Math.max(568, rect.height);
-    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     const outerRadius = Math.min(width * 0.425, height * 0.302);
     const unit = clamp(outerRadius / 215, 0.72, 1.22);
     const center = { x: width / 2, y: height * 0.515 };
@@ -412,13 +416,24 @@ function update(dt) {
         }
         updateBall(ball, dt);
     }
-    balls = balls.filter((ball) => ball.alive);
+    compactAliveBalls();
     maxBallsReached = Math.max(maxBallsReached, balls.length);
     if (balls.length === 0 && state === "RUNNING") {
         state = "GAME OVER";
         spawnScreenConfetti(70, 0.45);
     }
     updateUi();
+}
+function compactAliveBalls() {
+    let writeIndex = 0;
+    for (let i = 0; i < balls.length; i += 1) {
+        const ball = balls[i];
+        if (ball?.alive) {
+            balls[writeIndex] = ball;
+            writeIndex += 1;
+        }
+    }
+    balls.length = writeIndex;
 }
 function driftRingGaps(dt) {
     const stallBoost = getStallSeconds() > 8 ? 1.45 : 1;
@@ -443,7 +458,7 @@ function updateBall(ball, dt) {
         collideBallWithRing(ball, ring);
     }
     collectTouchedPickups(ball);
-    checkOuterBoundary(ball);
+    resolveOuterBoundary(ball);
     recordRadiusProgress(ball);
     pushTrail(ball);
 }
@@ -517,12 +532,15 @@ function collideBallWithRing(ball, ring) {
     if (Math.abs(dist - ring.radius) > collisionBand) {
         return;
     }
+    bounceBallOffRadialSurface(ball, dx, dy, dist, ring.radius, collisionBand);
+}
+function bounceBallOffRadialSurface(ball, dx, dy, dist, radius, collisionBand) {
     const nx = dx / dist;
     const ny = dy / dist;
     const radialVelocity = ball.vx * nx + ball.vy * ny;
-    const side = dist < ring.radius ? -1 : 1;
+    const side = dist < radius ? -1 : 1;
     const movingTowardRing = side < 0 ? radialVelocity > 0 : radialVelocity < 0;
-    const targetDistance = ring.radius + side * (collisionBand + 0.75 * geometry.unit);
+    const targetDistance = radius + side * (collisionBand + 0.75 * geometry.unit);
     if (!movingTowardRing) {
         ball.x = geometry.center.x + nx * targetDistance;
         ball.y = geometry.center.y + ny * targetDistance;
@@ -541,9 +559,18 @@ function collideBallWithRing(ball, ring) {
     ball.vx = Math.cos(jitterAngle) * speed;
     ball.vy = Math.sin(jitterAngle) * speed;
     enforceSpeed(ball);
-    if (Math.random() < 0.28) {
+    if (particles.length < MAX_PARTICLES - 6 && Math.random() < getCollisionSparkChance()) {
         spawnBurst(ball.x, ball.y, ball.color, 3, 0.35);
     }
+}
+function getCollisionSparkChance() {
+    if (balls.length > 120) {
+        return 0.06;
+    }
+    if (balls.length > 60) {
+        return 0.12;
+    }
+    return 0.24;
 }
 function collectTouchedPickups(ball) {
     for (let i = pickups.length - 1; i >= 0; i -= 1) {
@@ -593,20 +620,32 @@ function activateMultiplierPickup(source, pickup) {
     source.vy = Math.sin(sourceAngle) * sourceSpeed;
     maxBallsReached = Math.max(maxBallsReached, balls.length);
 }
-function checkOuterBoundary(ball) {
+function getOuterRingLineWidth() {
+    return geometry.ringLineWidth * OUTER_RING_LINE_SCALE;
+}
+function resolveOuterBoundary(ball) {
     const dx = ball.x - geometry.center.x;
     const dy = ball.y - geometry.center.y;
-    const dist = length(dx, dy);
-    if (dist < geometry.outerRadius - ball.radius * 0.2) {
-        return;
-    }
+    const dist = Math.max(0.001, length(dx, dy));
     const angle = Math.atan2(dy, dx);
-    if (isAngleInGap(angle, getOuterGapCenter(), getOuterGapSize(), ball.radius / geometry.outerRadius)) {
-        triggerSuccess(ball);
+    const outerLineWidth = getOuterRingLineWidth();
+    const outerEdge = geometry.outerRadius + outerLineWidth / 2;
+    const gapPadding = ball.radius / geometry.outerRadius + 0.018;
+    if (isAngleInGap(angle, getOuterGapCenter(), getOuterGapSize(), gapPadding)) {
+        if (dist + ball.radius > outerEdge) {
+            triggerSuccess(ball);
+        }
         return;
     }
-    ball.alive = false;
-    spawnBurst(ball.x, ball.y, ball.color, PARTICLE_COUNT, 0.95);
+    const collisionBand = outerLineWidth / 2 + ball.radius;
+    if (Math.abs(dist - geometry.outerRadius) <= collisionBand) {
+        bounceBallOffRadialSurface(ball, dx, dy, dist, geometry.outerRadius, collisionBand);
+        return;
+    }
+    if (dist - ball.radius > outerEdge) {
+        ball.alive = false;
+        spawnBurst(ball.x, ball.y, ball.color, PARTICLE_COUNT, 0.95);
+    }
 }
 function triggerSuccess(ball) {
     if (state === "SUCCESS") {
@@ -626,13 +665,28 @@ function triggerSuccess(ball) {
     updateUi();
 }
 function pushTrail(ball) {
+    if (TRAIL_LENGTH <= 0) {
+        ball.trail.length = 0;
+        return;
+    }
+    const last = ball.trail[ball.trail.length - 1];
+    if (last) {
+        const dx = ball.x - last.x;
+        const dy = ball.y - last.y;
+        const minDistance = ball.radius * 0.42;
+        if (dx * dx + dy * dy < minDistance * minDistance) {
+            last.x = ball.x;
+            last.y = ball.y;
+            return;
+        }
+    }
     ball.trail.push({ x: ball.x, y: ball.y });
     if (ball.trail.length > TRAIL_LENGTH) {
-        ball.trail.shift();
+        ball.trail.splice(0, ball.trail.length - TRAIL_LENGTH);
     }
 }
 function spawnBurst(x, y, color, count, power = 1) {
-    const scaledCount = Math.round(count);
+    const scaledCount = reserveParticleSlots(count);
     for (let i = 0; i < scaledCount; i += 1) {
         const angle = Math.random() * TAU;
         const speed = randomBetween(45, 260) * geometry.unit * power;
@@ -645,15 +699,13 @@ function spawnBurst(x, y, color, count, power = 1) {
             maxLife: randomBetween(0.65, 1.15) * power,
             size: randomBetween(2.2, 5.5) * geometry.unit * power,
             color: Math.random() < 0.72 ? color : randomBallColor(),
-            rotation: Math.random() * TAU,
-            spin: randomBetween(-9, 9),
             shape: Math.random() < 0.34 ? "square" : Math.random() < 0.55 ? "triangle" : "circle"
         });
     }
-    trimParticles();
 }
 function spawnScreenConfetti(count, power) {
-    for (let i = 0; i < count; i += 1) {
+    const scaledCount = reserveParticleSlots(count);
+    for (let i = 0; i < scaledCount; i += 1) {
         const x = randomBetween(geometry.width * 0.12, geometry.width * 0.88);
         const y = randomBetween(geometry.height * 0.02, geometry.height * 0.28);
         const speed = randomBetween(80, 330) * geometry.unit * power;
@@ -667,17 +719,17 @@ function spawnScreenConfetti(count, power) {
             maxLife: randomBetween(1.4, 2.8),
             size: randomBetween(2.5, 6.5) * geometry.unit,
             color: colorFromPalette(elapsed, Math.random()),
-            rotation: Math.random() * TAU,
-            spin: randomBetween(-10, 10),
             shape: Math.random() < 0.5 ? "square" : "triangle"
         });
     }
-    trimParticles();
 }
-function trimParticles() {
-    if (particles.length > MAX_PARTICLES) {
-        particles.splice(0, particles.length - MAX_PARTICLES);
+function reserveParticleSlots(count) {
+    const safeCount = Math.min(Math.max(0, Math.round(count)), MAX_PARTICLES);
+    const overflow = particles.length + safeCount - MAX_PARTICLES;
+    if (overflow > 0) {
+        particles.splice(0, overflow);
     }
+    return safeCount;
 }
 function spawnFloatingText(x, y, text, color) {
     floatingTexts.push({
@@ -694,24 +746,37 @@ function spawnFloatingText(x, y, text, color) {
     }
 }
 function updateParticles(dt) {
-    for (const particle of particles) {
+    let writeIndex = 0;
+    for (let i = 0; i < particles.length; i += 1) {
+        const particle = particles[i];
         particle.life -= dt;
+        if (particle.life <= 0) {
+            continue;
+        }
         particle.vy += 105 * geometry.unit * dt;
         particle.vx *= 0.992;
         particle.vy *= 0.992;
         particle.x += particle.vx * dt;
         particle.y += particle.vy * dt;
-        particle.rotation += particle.spin * dt;
+        particles[writeIndex] = particle;
+        writeIndex += 1;
     }
-    particles = particles.filter((particle) => particle.life > 0);
+    particles.length = writeIndex;
 }
 function updateFloatingTexts(dt) {
-    for (const item of floatingTexts) {
+    let writeIndex = 0;
+    for (let i = 0; i < floatingTexts.length; i += 1) {
+        const item = floatingTexts[i];
         item.life -= dt;
+        if (item.life <= 0) {
+            continue;
+        }
         item.y += item.vy * dt;
         item.vy *= 0.985;
+        floatingTexts[writeIndex] = item;
+        writeIndex += 1;
     }
-    floatingTexts = floatingTexts.filter((item) => item.life > 0);
+    floatingTexts.length = writeIndex;
 }
 function draw(timeSeconds) {
     drawBackground(timeSeconds);
@@ -760,6 +825,8 @@ function drawSpikes(timeSeconds) {
     const gapSize = getOuterGapSize();
     ctx.save();
     ctx.translate(geometry.center.x, geometry.center.y);
+    ctx.globalAlpha = 0.82;
+    ctx.shadowBlur = 0;
     for (let i = 0; i < SPIKE_COUNT; i += 1) {
         const angle = i * step;
         if (isAngleInGap(angle, gapCenter, gapSize + 0.26)) {
@@ -774,9 +841,6 @@ function drawSpikes(timeSeconds) {
         ctx.lineTo(Math.cos(right) * baseRadius, Math.sin(right) * baseRadius);
         ctx.closePath();
         ctx.fillStyle = color;
-        ctx.shadowColor = color;
-        ctx.shadowBlur = 10 * geometry.unit;
-        ctx.globalAlpha = 0.82;
         ctx.fill();
     }
     ctx.restore();
@@ -787,7 +851,7 @@ function drawRings(timeSeconds) {
     }
     const outerRing = {
         radius: geometry.outerRadius,
-        lineWidth: geometry.ringLineWidth * 1.12,
+        lineWidth: getOuterRingLineWidth(),
         gapCenterAngle: getOuterGapCenter(),
         gapSizeAngle: getOuterGapSize(),
         colorOffset: 0.98
@@ -876,76 +940,83 @@ function drawPickups(timeSeconds) {
 function drawTrails() {
     ctx.save();
     ctx.lineCap = "round";
+    ctx.shadowBlur = 0;
+    const trailAlpha = balls.length > 120 ? 0.14 : 0.22;
+    const trailWidth = balls.length > 120 ? 0.68 : 0.88;
     for (const ball of balls) {
         if (ball.trail.length < 2) {
             continue;
         }
+        const trail = ball.trail;
+        ctx.strokeStyle = ball.color;
+        ctx.globalAlpha = trailAlpha;
+        ctx.lineWidth = Math.max(1, ball.radius * trailWidth);
+        ctx.beginPath();
+        ctx.moveTo(trail[0].x, trail[0].y);
         for (let i = 1; i < ball.trail.length; i += 1) {
-            const prev = ball.trail[i - 1];
-            const point = ball.trail[i];
-            const alpha = (i / ball.trail.length) ** 1.7;
-            ctx.strokeStyle = ball.color;
-            ctx.globalAlpha = alpha * 0.36;
-            ctx.lineWidth = ball.radius * (0.35 + alpha * 0.85);
-            ctx.shadowColor = ball.color;
-            ctx.shadowBlur = 12 * geometry.unit;
-            ctx.beginPath();
-            ctx.moveTo(prev.x, prev.y);
+            const point = trail[i];
             ctx.lineTo(point.x, point.y);
-            ctx.stroke();
         }
+        ctx.stroke();
     }
     ctx.restore();
 }
 function drawBalls(timeSeconds) {
+    ctx.shadowBlur = 0;
+    const glowScale = BALL_GLOW_MODE === "cheap" ? 1 : 1.18;
     for (const ball of balls) {
         const pulse = 1 + Math.sin(timeSeconds * 7 + ball.x * 0.013) * 0.045;
         const radius = ball.radius * pulse;
-        const highlight = ctx.createRadialGradient(ball.x - radius * 0.34, ball.y - radius * 0.42, radius * 0.1, ball.x, ball.y, radius);
-        highlight.addColorStop(0, "#ffffff");
-        highlight.addColorStop(0.28, ball.color);
-        highlight.addColorStop(1, "rgba(255,255,255,0.08)");
-        ctx.save();
-        ctx.shadowColor = ball.color;
-        ctx.shadowBlur = 18 * geometry.unit;
-        ctx.fillStyle = highlight;
+        ctx.fillStyle = ball.color;
+        ctx.globalAlpha = 0.13;
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, radius * 2.35 * glowScale, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 0.24;
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, radius * 1.55 * glowScale, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 0.98;
         ctx.beginPath();
         ctx.arc(ball.x, ball.y, radius, 0, TAU);
         ctx.fill();
+        ctx.globalAlpha = 0.72;
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.arc(ball.x - radius * 0.33, ball.y - radius * 0.37, radius * 0.28, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = 1;
         ctx.lineWidth = Math.max(1, 1.2 * geometry.unit);
         ctx.strokeStyle = "rgba(255,255,255,0.72)";
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, radius, 0, TAU);
         ctx.stroke();
-        ctx.restore();
     }
 }
 function drawParticles() {
+    ctx.shadowBlur = 0;
     for (const particle of particles) {
         const alpha = clamp(particle.life / particle.maxLife, 0, 1);
-        ctx.save();
-        ctx.translate(particle.x, particle.y);
-        ctx.rotate(particle.rotation);
         ctx.globalAlpha = alpha;
         ctx.fillStyle = particle.color;
-        ctx.shadowColor = particle.color;
-        ctx.shadowBlur = 11 * geometry.unit;
         if (particle.shape === "circle") {
             ctx.beginPath();
-            ctx.arc(0, 0, particle.size, 0, TAU);
+            ctx.arc(particle.x, particle.y, particle.size, 0, TAU);
             ctx.fill();
         }
         else if (particle.shape === "square") {
-            ctx.fillRect(-particle.size, -particle.size, particle.size * 2, particle.size * 2);
+            ctx.fillRect(particle.x - particle.size, particle.y - particle.size, particle.size * 2, particle.size * 2);
         }
         else {
             ctx.beginPath();
-            ctx.moveTo(0, -particle.size * 1.3);
-            ctx.lineTo(particle.size * 1.2, particle.size);
-            ctx.lineTo(-particle.size * 1.2, particle.size);
+            ctx.moveTo(particle.x, particle.y - particle.size * 1.3);
+            ctx.lineTo(particle.x + particle.size * 1.2, particle.y + particle.size);
+            ctx.lineTo(particle.x - particle.size * 1.2, particle.y + particle.size);
             ctx.closePath();
             ctx.fill();
         }
-        ctx.restore();
     }
+    ctx.globalAlpha = 1;
 }
 function drawFloatingTexts() {
     for (const item of floatingTexts) {
@@ -975,16 +1046,18 @@ function drawDebugOverlay() {
     }
     ctx.save();
     ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(12, geometry.height - 132, 230, 114);
+    ctx.fillRect(12, geometry.height - 156, 252, 138);
     ctx.fillStyle = "#ffffff";
     ctx.font = "12px ui-monospace, SFMono-Regular, Consolas, monospace";
     ctx.textBaseline = "top";
-    ctx.fillText(`FPS: ${fps.toFixed(0)}`, 24, geometry.height - 120);
-    ctx.fillText(`Balls: ${balls.length}/${MAX_BALLS}`, 24, geometry.height - 102);
-    ctx.fillText(`Particles: ${particles.length}`, 24, geometry.height - 84);
-    ctx.fillText(`Time: ${runElapsed.toFixed(1)}s`, 24, geometry.height - 66);
-    ctx.fillText(`Level: ${getLevel().name}`, 24, geometry.height - 48);
-    ctx.fillText(`Max radius: ${Math.round(maxRadiusReached)}`, 24, geometry.height - 30);
+    ctx.fillText(`FPS: ${fps.toFixed(0)}`, 24, geometry.height - 144);
+    ctx.fillText(`Balls: ${balls.length}/${MAX_BALLS}`, 24, geometry.height - 126);
+    ctx.fillText(`Particles: ${particles.length}/${MAX_PARTICLES}`, 24, geometry.height - 108);
+    ctx.fillText(`DPR: ${geometry.dpr.toFixed(2)} / Q: ${QUALITY}`, 24, geometry.height - 90);
+    ctx.fillText(`Render: ${BALL_GLOW_MODE}`, 24, geometry.height - 72);
+    ctx.fillText(`Time: ${runElapsed.toFixed(1)}s`, 24, geometry.height - 54);
+    ctx.fillText(`Level: ${getLevel().name}`, 24, geometry.height - 36);
+    ctx.fillText(`Max radius: ${Math.round(maxRadiusReached)}`, 24, geometry.height - 18);
     ctx.restore();
 }
 function updateUi() {
