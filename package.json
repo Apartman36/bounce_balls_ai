@@ -1,0 +1,9 @@
+{
+  "name": "neon-bounce-spiral",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A zero-bundler neon bouncing-ball spiral simulator that runs by opening index.html.",
+  "scripts": {
+    "check": "node --check src/main.js"
+  }
+}

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Neon Bounce Spiral</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <main class="sim-shell" aria-label="Neon Bounce Spiral simulator">
+        <canvas id="gameCanvas" aria-label="Neon bouncing-ball simulator"></canvas>
+
+        <section class="hud" aria-label="Simulation stats">
+          <div class="hud-title">
+            <span>Neon Bounce Spiral</span>
+            <small id="mapName">Classic Spiral</small>
+          </div>
+          <div class="hud-stats">
+            <span>State <strong id="stateValue">READY</strong></span>
+            <span>Balls <strong id="ballCount">0</strong></span>
+            <span>Multis <strong id="pickupCount">0</strong></span>
+            <span>Time <strong id="timeValue">0.0s</strong></span>
+            <span>Max <strong id="maxBallCount">0</strong></span>
+          </div>
+          <div class="hud-controls" aria-label="Simulation controls">
+            <button id="actionButton" type="button">Start</button>
+            <button id="newRunButton" type="button">New Run</button>
+            <button id="nextMapButton" type="button">Next Map</button>
+            <button id="fullscreenButton" type="button">Fullscreen</button>
+          </div>
+        </section>
+
+        <div id="centerMessage" class="center-message">
+          <strong>READY</strong>
+          <span>Click Start</span>
+        </div>
+      </main>
+    </div>
+    <script src="./src/main.js" defer></script>
+  </body>
+</html>
