@@ -143,7 +143,7 @@ canvas {
 
 .hud-controls {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, auto));
+  grid-template-columns: repeat(3, minmax(0, auto));
   gap: 7px;
   align-items: center;
   justify-content: start;

@@ -3,8 +3,11 @@ const MAX_BALLS = 400;
 const QUALITY = "balanced";
 const MAX_DPR = 1.5;
 const BALL_GLOW_MODE = "cheap";
+const TRAIL_MODE = "subtle";
+const BACKGROUND_FADE_ALPHA = 1;
 const MAX_PARTICLES = 520;
-const TRAIL_LENGTH = 10;
+const TRAIL_LENGTH = TRAIL_MODE === "subtle" ? 5 : 0;
+const TRAIL_POINT_TTL = 0.16;
 const BALL_RADIUS = 7;
 const BALL_SPEED = 330;
 const BOUNCE_DAMPING = 0.988;
@@ -24,6 +27,10 @@ const SUCCESS_CONFETTI = 260;
 const STALL_OUTWARD_START = 20;
 const OUTER_GAP_WIDEN_START = 25;
 const MAX_FLOATING_TEXTS = 18;
+const MUSIC_ENABLED = true;
+const MUSIC_VOLUME = 0.12;
+const BOUNCE_SOUND_WINDOW_MS = 80;
+const MAX_BOUNCE_SOUNDS_PER_WINDOW = 3;
 const LEVELS = [
     {
         name: "Classic Spiral",
@@ -141,6 +148,8 @@ const actionButton = requiredElement("#actionButton");
 const newRunButton = requiredElement("#newRunButton");
 const nextMapButton = requiredElement("#nextMapButton");
 const fullscreenButton = requiredElement("#fullscreenButton");
+const soundButton = requiredElement("#soundButton");
+const musicButton = requiredElement("#musicButton");
 const centerMessage = requiredElement("#centerMessage");
 const ctx = requiredContext(canvas);
 let geometry = {
@@ -176,6 +185,15 @@ let maxBallsReached = 0;
 let maxRadiusReached = 0;
 let lastProgressElapsed = 0;
 let resizeObserver;
+let audioContext;
+let audioAvailable = true;
+let soundEnabled = true;
+let musicEnabled = MUSIC_ENABLED;
+let musicElement = null;
+let musicLoadFailed = false;
+let bounceSoundWindowStart = 0;
+let bounceSoundCount = 0;
+let lastDeathSoundAt = 0;
 const randomBetween = (min, max) => min + Math.random() * (max - min);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const length = (x, y) => Math.hypot(x, y);
@@ -192,6 +210,225 @@ function requiredContext(targetCanvas) {
         throw new Error("Canvas 2D context is not available.");
     }
     return context;
+}
+function ensureAudioContext() {
+    if (!audioAvailable || !soundEnabled) {
+        return null;
+    }
+    try {
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextConstructor) {
+            audioAvailable = false;
+            return null;
+        }
+        if (!audioContext) {
+            audioContext = new AudioContextConstructor();
+        }
+        return audioContext;
+    }
+    catch {
+        audioAvailable = false;
+        return null;
+    }
+}
+function startAudioFromGesture() {
+    if (soundEnabled) {
+        const context = ensureAudioContext();
+        if (context?.state === "suspended") {
+            context.resume().catch(() => {
+                audioAvailable = false;
+            });
+        }
+    }
+    if (musicEnabled) {
+        playMusic();
+    }
+}
+function getPlayableAudioContext() {
+    if (!soundEnabled || !audioAvailable || !audioContext || audioContext.state !== "running") {
+        return null;
+    }
+    return audioContext;
+}
+function getCrowdSoundScale() {
+    return clamp(1 - Math.max(0, balls.length - 1) / 260, 0.22, 1);
+}
+function scheduleTone(startFrequency, endFrequency, duration, volume, type = "sine", delay = 0) {
+    const context = getPlayableAudioContext();
+    if (!context || volume <= 0) {
+        return;
+    }
+    try {
+        const startAt = context.currentTime + delay;
+        const stopAt = startAt + duration + 0.04;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(Math.max(1, startFrequency), startAt);
+        oscillator.frequency.exponentialRampToValueAtTime(Math.max(1, endFrequency), startAt + duration);
+        gain.gain.setValueAtTime(0.0001, startAt);
+        gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, volume), startAt + 0.006);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(startAt);
+        oscillator.stop(stopAt);
+        oscillator.onended = () => {
+            oscillator.disconnect();
+            gain.disconnect();
+        };
+    }
+    catch {
+        audioAvailable = false;
+    }
+}
+function scheduleNoisePop(duration, volume, delay = 0) {
+    const context = getPlayableAudioContext();
+    if (!context || volume <= 0) {
+        return;
+    }
+    try {
+        const frameCount = Math.max(1, Math.floor(context.sampleRate * duration));
+        const buffer = context.createBuffer(1, frameCount, context.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < frameCount; i += 1) {
+            const fade = 1 - i / frameCount;
+            data[i] = (Math.random() * 2 - 1) * fade;
+        }
+        const startAt = context.currentTime + delay;
+        const source = context.createBufferSource();
+        const filter = context.createBiquadFilter();
+        const gain = context.createGain();
+        source.buffer = buffer;
+        filter.type = "bandpass";
+        filter.frequency.setValueAtTime(520, startAt);
+        filter.Q.setValueAtTime(0.8, startAt);
+        gain.gain.setValueAtTime(Math.max(0.0001, volume), startAt);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+        source.connect(filter);
+        filter.connect(gain);
+        gain.connect(context.destination);
+        source.start(startAt);
+        source.stop(startAt + duration);
+        source.onended = () => {
+            source.disconnect();
+            filter.disconnect();
+            gain.disconnect();
+        };
+    }
+    catch {
+        audioAvailable = false;
+    }
+}
+function playBounceSound(ball) {
+    if (!canPlayBounceSound()) {
+        return;
+    }
+    const speed = length(ball.vx, ball.vy);
+    const pitch = clamp(180 + speed * 0.45, 220, 560) * randomBetween(0.93, 1.08);
+    scheduleTone(pitch, pitch * 0.68, 0.04, 0.03 * getCrowdSoundScale(), "triangle");
+}
+function canPlayBounceSound() {
+    const now = performance.now();
+    if (now - bounceSoundWindowStart > BOUNCE_SOUND_WINDOW_MS) {
+        bounceSoundWindowStart = now;
+        bounceSoundCount = 0;
+    }
+    if (bounceSoundCount >= MAX_BOUNCE_SOUNDS_PER_WINDOW) {
+        return false;
+    }
+    bounceSoundCount += 1;
+    return true;
+}
+function playPickupSound(pickup) {
+    const volume = 0.045 * getCrowdSoundScale();
+    const base = 520 + pickup.factor * 42;
+    scheduleTone(base, base * 1.32, 0.055, volume, "sine");
+    scheduleTone(base * 1.5, base * 1.75, 0.06, volume * 0.92, "triangle", 0.055);
+    scheduleTone(base * 2.05, base * 2.26, 0.065, volume * 0.82, "sine", 0.11);
+}
+function playDeathSound() {
+    const now = performance.now();
+    if (now - lastDeathSoundAt < 70) {
+        return;
+    }
+    lastDeathSoundAt = now;
+    const volume = 0.038 * getCrowdSoundScale();
+    scheduleNoisePop(0.07, volume);
+    scheduleTone(150, 74, 0.09, volume * 0.72, "sine");
+}
+function playSuccessSound() {
+    scheduleTone(523.25, 529, 0.22, 0.04, "sine");
+    scheduleTone(659.25, 666, 0.22, 0.034, "sine");
+    scheduleTone(783.99, 792, 0.22, 0.032, "sine");
+    scheduleTone(880, 988, 0.09, 0.04, "triangle", 0.08);
+    scheduleTone(1174.66, 1318.51, 0.1, 0.035, "triangle", 0.15);
+}
+function playGameOverSound() {
+    scheduleTone(196, 73.42, 0.36, 0.055, "sawtooth");
+}
+function ensureMusicElement() {
+    if (musicLoadFailed) {
+        return null;
+    }
+    if (musicElement) {
+        return musicElement;
+    }
+    try {
+        musicElement = new Audio("./assets/music.mp3");
+        musicElement.loop = true;
+        musicElement.volume = MUSIC_VOLUME;
+        musicElement.preload = "auto";
+        musicElement.addEventListener("error", () => {
+            musicLoadFailed = true;
+            updateUi();
+        }, { once: true });
+        return musicElement;
+    }
+    catch {
+        musicLoadFailed = true;
+        return null;
+    }
+}
+function playMusic() {
+    if (!musicEnabled) {
+        return;
+    }
+    const track = ensureMusicElement();
+    if (!track) {
+        return;
+    }
+    track.volume = MUSIC_VOLUME;
+    const playRequest = track.play();
+    if (playRequest?.catch) {
+        playRequest.catch(() => {
+            musicLoadFailed = true;
+            updateUi();
+        });
+    }
+}
+function pauseMusic() {
+    if (musicElement) {
+        musicElement.pause();
+    }
+}
+function toggleSound() {
+    soundEnabled = !soundEnabled;
+    if (soundEnabled) {
+        startAudioFromGesture();
+    }
+    updateUi();
+}
+function toggleMusic() {
+    musicEnabled = !musicEnabled;
+    if (musicEnabled) {
+        musicLoadFailed = false;
+        startAudioFromGesture();
+    }
+    else {
+        pauseMusic();
+    }
+    updateUi();
 }
 function normalizeAngle(angle) {
     return ((angle % TAU) + TAU) % TAU;
@@ -302,7 +539,7 @@ function createBall(x, y, angle, speed, color = randomBallColor()) {
         vy: Math.sin(angle) * speed,
         radius: geometry.ballRadius,
         color,
-        trail: [{ x, y }],
+        trail: TRAIL_MODE === "subtle" ? [{ x, y, age: 0 }] : [],
         alive: true,
         spin: Math.random() < 0.5 ? -1 : 1
     };
@@ -388,7 +625,10 @@ function rescaleEntities(oldGeometry, nextGeometry) {
         ball.vx *= scale;
         ball.vy *= scale;
         ball.radius = nextGeometry.ballRadius;
-        ball.trail = ball.trail.map(movePoint);
+        ball.trail = ball.trail.map((point) => ({
+            ...movePoint(point),
+            age: point.age ?? 0
+        }));
     }
     for (const particle of particles) {
         const moved = movePoint(particle);
@@ -403,6 +643,7 @@ function update(dt) {
     elapsed += dt;
     updateParticles(dt);
     updateFloatingTexts(dt);
+    updateTrails(dt);
     if (state !== "RUNNING") {
         return;
     }
@@ -420,6 +661,7 @@ function update(dt) {
     maxBallsReached = Math.max(maxBallsReached, balls.length);
     if (balls.length === 0 && state === "RUNNING") {
         state = "GAME OVER";
+        playGameOverSound();
         spawnScreenConfetti(70, 0.45);
     }
     updateUi();
@@ -544,6 +786,7 @@ function bounceBallOffRadialSurface(ball, dx, dy, dist, radius, collisionBand) {
     if (!movingTowardRing) {
         ball.x = geometry.center.x + nx * targetDistance;
         ball.y = geometry.center.y + ny * targetDistance;
+        resetBallTrail(ball);
         return;
     }
     if (Math.abs(radialVelocity) < 4) {
@@ -559,6 +802,8 @@ function bounceBallOffRadialSurface(ball, dx, dy, dist, radius, collisionBand) {
     ball.vx = Math.cos(jitterAngle) * speed;
     ball.vy = Math.sin(jitterAngle) * speed;
     enforceSpeed(ball);
+    resetBallTrail(ball);
+    playBounceSound(ball);
     if (particles.length < MAX_PARTICLES - 6 && Math.random() < getCollisionSparkChance()) {
         spawnBurst(ball.x, ball.y, ball.color, 3, 0.35);
     }
@@ -582,6 +827,7 @@ function collectTouchedPickups(ball) {
         pickups.splice(i, 1);
         collectedPickupIds.add(pickup.id);
         collectedMultipliers += 1;
+        playPickupSound(pickup);
         activateMultiplierPickup(ball, pickup);
         spawnBurst(pickup.x, pickup.y, pickup.color, PARTICLE_COUNT * 2, 1.25);
         lastProgressElapsed = runElapsed;
@@ -644,6 +890,7 @@ function resolveOuterBoundary(ball) {
     }
     if (dist - ball.radius > outerEdge) {
         ball.alive = false;
+        playDeathSound();
         spawnBurst(ball.x, ball.y, ball.color, PARTICLE_COUNT, 0.95);
     }
 }
@@ -652,6 +899,7 @@ function triggerSuccess(ball) {
         return;
     }
     state = "SUCCESS";
+    playSuccessSound();
     const angle = Math.atan2(ball.y - geometry.center.y, ball.x - geometry.center.x);
     const edgeX = geometry.center.x + Math.cos(angle) * geometry.outerRadius;
     const edgeY = geometry.center.y + Math.sin(angle) * geometry.outerRadius;
@@ -665,7 +913,7 @@ function triggerSuccess(ball) {
     updateUi();
 }
 function pushTrail(ball) {
-    if (TRAIL_LENGTH <= 0) {
+    if (TRAIL_MODE !== "subtle" || TRAIL_LENGTH <= 0) {
         ball.trail.length = 0;
         return;
     }
@@ -677,12 +925,19 @@ function pushTrail(ball) {
         if (dx * dx + dy * dy < minDistance * minDistance) {
             last.x = ball.x;
             last.y = ball.y;
+            last.age = 0;
             return;
         }
     }
-    ball.trail.push({ x: ball.x, y: ball.y });
+    ball.trail.push({ x: ball.x, y: ball.y, age: 0 });
     if (ball.trail.length > TRAIL_LENGTH) {
         ball.trail.splice(0, ball.trail.length - TRAIL_LENGTH);
+    }
+}
+function resetBallTrail(ball) {
+    ball.trail.length = 0;
+    if (TRAIL_MODE === "subtle" && TRAIL_LENGTH > 0) {
+        ball.trail.push({ x: ball.x, y: ball.y, age: 0 });
     }
 }
 function spawnBurst(x, y, color, count, power = 1) {
@@ -778,6 +1033,27 @@ function updateFloatingTexts(dt) {
     }
     floatingTexts.length = writeIndex;
 }
+function updateTrails(dt) {
+    if (TRAIL_MODE !== "subtle" || TRAIL_LENGTH <= 0) {
+        for (const ball of balls) {
+            ball.trail.length = 0;
+        }
+        return;
+    }
+    for (const ball of balls) {
+        let writeIndex = 0;
+        for (let i = 0; i < ball.trail.length; i += 1) {
+            const point = ball.trail[i];
+            point.age = (point.age ?? 0) + dt;
+            if (point.age > TRAIL_POINT_TTL) {
+                continue;
+            }
+            ball.trail[writeIndex] = point;
+            writeIndex += 1;
+        }
+        ball.trail.length = writeIndex;
+    }
+}
 function draw(timeSeconds) {
     drawBackground(timeSeconds);
     drawSpikes(timeSeconds);
@@ -795,8 +1071,10 @@ function drawBackground(timeSeconds) {
     bg.addColorStop(0, "rgba(17, 20, 38, 0.94)");
     bg.addColorStop(0.46, "rgba(4, 5, 12, 0.98)");
     bg.addColorStop(1, "rgba(2, 2, 6, 1)");
+    ctx.globalAlpha = clamp(BACKGROUND_FADE_ALPHA, 0, 1);
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, geometry.width, geometry.height);
+    ctx.globalAlpha = 1;
     ctx.save();
     ctx.globalAlpha = 0.08;
     ctx.strokeStyle = colorFromPalette(timeSeconds, 0.15);
@@ -938,26 +1216,37 @@ function drawPickups(timeSeconds) {
     }
 }
 function drawTrails() {
+    if (TRAIL_MODE !== "subtle" || TRAIL_LENGTH <= 0) {
+        return;
+    }
     ctx.save();
     ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.shadowBlur = 0;
-    const trailAlpha = balls.length > 120 ? 0.14 : 0.22;
-    const trailWidth = balls.length > 120 ? 0.68 : 0.88;
+    const trailAlpha = balls.length > 120 ? 0.035 : 0.055;
+    const trailWidth = balls.length > 120 ? 0.34 : 0.48;
     for (const ball of balls) {
         if (ball.trail.length < 2) {
             continue;
         }
         const trail = ball.trail;
         ctx.strokeStyle = ball.color;
-        ctx.globalAlpha = trailAlpha;
-        ctx.lineWidth = Math.max(1, ball.radius * trailWidth);
-        ctx.beginPath();
-        ctx.moveTo(trail[0].x, trail[0].y);
-        for (let i = 1; i < ball.trail.length; i += 1) {
+        for (let i = 1; i < trail.length; i += 1) {
+            const previous = trail[i - 1];
             const point = trail[i];
+            const ageFade = clamp(1 - (point.age ?? 0) / TRAIL_POINT_TTL, 0, 1);
+            const segmentFade = i / (trail.length - 1);
+            const alpha = trailAlpha * ageFade * segmentFade * segmentFade;
+            if (alpha <= 0.002) {
+                continue;
+            }
+            ctx.globalAlpha = alpha;
+            ctx.lineWidth = Math.max(1, ball.radius * trailWidth * (0.45 + segmentFade * 0.55));
+            ctx.beginPath();
+            ctx.moveTo(previous.x, previous.y);
             ctx.lineTo(point.x, point.y);
+            ctx.stroke();
         }
-        ctx.stroke();
     }
     ctx.restore();
 }
@@ -1054,7 +1343,7 @@ function drawDebugOverlay() {
     ctx.fillText(`Balls: ${balls.length}/${MAX_BALLS}`, 24, geometry.height - 126);
     ctx.fillText(`Particles: ${particles.length}/${MAX_PARTICLES}`, 24, geometry.height - 108);
     ctx.fillText(`DPR: ${geometry.dpr.toFixed(2)} / Q: ${QUALITY}`, 24, geometry.height - 90);
-    ctx.fillText(`Render: ${BALL_GLOW_MODE}`, 24, geometry.height - 72);
+    ctx.fillText(`Render: ${BALL_GLOW_MODE} / Trails: ${TRAIL_MODE}`, 24, geometry.height - 72);
     ctx.fillText(`Time: ${runElapsed.toFixed(1)}s`, 24, geometry.height - 54);
     ctx.fillText(`Level: ${getLevel().name}`, 24, geometry.height - 36);
     ctx.fillText(`Max radius: ${Math.round(maxRadiusReached)}`, 24, geometry.height - 18);
@@ -1069,6 +1358,11 @@ function updateUi() {
     maxBallCountValue.textContent = String(maxBallsReached);
     actionButton.textContent = state === "READY" ? "Start" : "Restart";
     fullscreenButton.textContent = document.fullscreenElement ? "Exit Full" : "Fullscreen";
+    soundButton.textContent = soundEnabled ? "Sound On" : "Sound Off";
+    soundButton.setAttribute("aria-pressed", String(soundEnabled));
+    musicButton.textContent = musicEnabled ? "Music On" : "Music Off";
+    musicButton.setAttribute("aria-pressed", String(musicEnabled));
+    musicButton.title = musicLoadFailed ? "Optional assets/music.mp3 was not loaded." : "Toggle background music.";
     if (state === "RUNNING") {
         centerMessage.classList.add("is-hidden");
         centerMessage.classList.remove("is-success", "is-game-over");
@@ -1097,6 +1391,7 @@ function updateUi() {
     }
 }
 function startGame() {
+    startAudioFromGesture();
     if (state !== "READY") {
         resetLevel("RUNNING");
         return;
@@ -1108,9 +1403,11 @@ function startGame() {
     updateUi();
 }
 function startNewRun() {
+    startAudioFromGesture();
     resetLevel("RUNNING", true);
 }
 function nextMap() {
+    startAudioFromGesture();
     levelIndex = (levelIndex + 1) % LEVELS.length;
     resetLevel("RUNNING");
 }
@@ -1130,10 +1427,12 @@ function togglePauseOrStart() {
         updateUi();
     }
     else if (state === "PAUSED") {
+        startAudioFromGesture();
         state = "RUNNING";
         updateUi();
     }
     else {
+        startAudioFromGesture();
         resetLevel("RUNNING");
     }
 }
@@ -1166,6 +1465,12 @@ nextMapButton.addEventListener("click", () => {
 fullscreenButton.addEventListener("click", () => {
     toggleFullscreen();
 });
+soundButton.addEventListener("click", () => {
+    toggleSound();
+});
+musicButton.addEventListener("click", () => {
+    toggleMusic();
+});
 document.addEventListener("fullscreenchange", () => {
     updateUi();
 });
@@ -1178,6 +1483,7 @@ window.addEventListener("keydown", (event) => {
         togglePauseOrStart();
     }
     else if (event.key.toLowerCase() === "r") {
+        startAudioFromGesture();
         resetLevel("RUNNING");
     }
     else if (event.key.toLowerCase() === "d") {
